@@ -13,13 +13,12 @@ namespace Hasher
 {
     public partial class HasherForm : Form
     {
-        //TODO: tabbing
         //TODO: layout
-        //TODO: add backgroundworker for file count
         //TODO: look at when the table should be cleared
         //TODO: performance improvements
+        //TODO: tabbing
         Dictionary<string, string> hashResults = new Dictionary<string, string>();
-        
+
         public HasherForm()
         {
             InitializeComponent();
@@ -27,40 +26,38 @@ namespace Hasher
 
         private void ComboBoxHash_SelectedIndexChanged(object sender, EventArgs e)
         {
-            // set the state of the key text box based on whether a keyed hash has been selected
-            using (System.Security.Cryptography.HashAlgorithm hash = System.Security.Cryptography.HashAlgorithm.Create(comboBoxHash.Text))
-            {
-                //System.Security.Cryptography.KeyedHashAlgorithm keyedHash = hash as System.Security.Cryptography.KeyedHashAlgorithm;
-                //if (keyedHash != null)  //TODO: test performance
-                textBoxHashKey.Enabled = (hash.GetType().IsSubclassOf(typeof(System.Security.Cryptography.KeyedHashAlgorithm)));
-            }
+            // enable controls as required
+            textBoxHashKey.Enabled = IsHashAlgorithm(comboBoxHash.Text);
+            buttonCalculate.Enabled = CheckCalculateButtonValidity(false);
 
-            buttonCalculate.Enabled = CheckCalculateButtonValidity();
-
-            dataGridViewHash.Rows.Clear();
+            // clear the table when hash changed
+            //dataGridViewHash.Rows.Clear();
         }
 
         private void TextBoxHashKey_TextChanged(object sender, EventArgs e)
         {
             // when entering a key, validate the form
-            buttonCalculate.Enabled = CheckCalculateButtonValidity();
+            buttonCalculate.Enabled = CheckCalculateButtonValidity(false);
 
+            // clear the table when hash key changed
             dataGridViewHash.Rows.Clear();
         }
-        
+
         private void DirectoryRadioButton_CheckedChanged(object sender, EventArgs e)
         {
             // set the state of the recursive option based on whether directory hashing has been selected
-            RecursiveCheckBox.Enabled = DirectoryRadioButton.Checked;
+            checkBoxRecursive.Enabled = radioButtonDirectory.Checked;
 
-            dataGridViewHash.Rows.Clear();
+            // clear the table when dialog type changed
+            //dataGridViewHash.Rows.Clear();
         }
 
         private void RecursiveCheckBox_CheckedChanged(object sender, EventArgs e)
         {
             // when changing the search type, validate the form and set the number of files
             buttonCalculate.Enabled = CheckCalculateButtonValidity(true);
-
+            
+            // clear the table when recursive setting changed
             dataGridViewHash.Rows.Clear();
         }
 
@@ -69,7 +66,7 @@ namespace Hasher
             DialogResult result;
 
             // show the related chooser dialog based on the radio button selection
-            if (FileRadioButton.Checked)
+            if (radioButtonFile.Checked)
             {
                 result = fileDialog.ShowDialog();
                 if (result == System.Windows.Forms.DialogResult.OK)
@@ -78,11 +75,12 @@ namespace Hasher
                     textBoxFileOrDirectoryToHash.Text = string.Join(";", fileDialog.FileNames);
                 }
             }
-            else if (DirectoryRadioButton.Checked)
+            else if (radioButtonDirectory.Checked)
             {
                 result = folderBrowserDialog.ShowDialog();
                 if (result == System.Windows.Forms.DialogResult.OK)
                 {
+                    // only able to return a single directory path
                     textBoxFileOrDirectoryToHash.Text = folderBrowserDialog.SelectedPath;
                 }
             }
@@ -118,10 +116,27 @@ namespace Hasher
             // should only be possible to click when valid but double check before starting
             if (CheckCalculateButtonValidity())
             {
-                dataGridViewHash.Rows.Clear();
+                // make sure the background worker is ready before starting
+                while (hashBackgroundWorker.IsBusy)
+                {
+                    hashBackgroundWorker.CancelAsync();
+                    Application.DoEvents();
+                }
 
+                // enable cancel and disable all other controls
+                buttonCancel.Enabled = true;
+                buttonCalculate.Enabled = false;
+                comboBoxHash.Enabled = false;
+                textBoxHashKey.Enabled = false;
+                textBoxFileOrDirectoryToHash.Enabled = false;
+                radioButtonFile.Enabled = false;
+                radioButtonDirectory.Enabled = false;
+                checkBoxRecursive.Enabled = false;
+                dataGridViewHash.Enabled = false;
+                buttonSelectFile.Enabled = false;
+                
                 System.IO.SearchOption searchOption;
-                if (RecursiveCheckBox.Checked)
+                if (checkBoxRecursive.Checked)
                 {
                     searchOption = System.IO.SearchOption.AllDirectories;
                 }
@@ -130,31 +145,36 @@ namespace Hasher
                     searchOption = System.IO.SearchOption.TopDirectoryOnly;
                 }
 
-                if (hashBackgroundWorker.IsBusy)
+                List<object> arguments = new List<object>
                 {
-                    hashBackgroundWorker.CancelAsync();
-                }
-                else
-                {
-                    List<object> arguments = new List<object>
-                    {
-                        textBoxFileOrDirectoryToHash.Text,
-                        comboBoxHash.Text,
-                        textBoxHashKey.Text,
-                        searchOption
-                    };
+                    textBoxFileOrDirectoryToHash.Text,
+                    comboBoxHash.Text,
+                    textBoxHashKey.Text,
+                    searchOption
+                };
 
-                    hashBackgroundWorker.RunWorkerAsync(arguments);
-                }
+                hashBackgroundWorker.RunWorkerAsync(arguments);
             }
+        }
+
+        private void ButtonCancel_Click(object sender, EventArgs e)
+        {
+            hashBackgroundWorker.CancelAsync();
+
+            //buttonCancel.Enabled = false;
         }
 
         private void HashBackgroundWorker_DoWork(object sender, DoWorkEventArgs e)
         {
+            // Do not access the form's BackgroundWorker reference directly.
+            // Instead, use the reference provided by the sender parameter.
+            BackgroundWorker bw = sender as BackgroundWorker;
+
             List<object> arguments = e.Argument as List<object>;
 
             List<string> filesToHash = new List<string>();
-            
+
+            // retrieve all files to hash from user input
             string[] list = ((string)arguments[0]).Split(';');
             foreach (string fileOrDirectory in list)
             {
@@ -169,31 +189,35 @@ namespace Hasher
             }
 
             // report the number of files to support the progress bar limits
-            hashBackgroundWorker.ReportProgress(0, filesToHash.Count);
+            bw.ReportProgress(0, filesToHash.Count);
 
-            if (filesToHash.Count > 0)
+            using (System.Security.Cryptography.HashAlgorithm hash = System.Security.Cryptography.HashAlgorithm.Create((string)arguments[1]))
             {
-                using (System.Security.Cryptography.HashAlgorithm hash = System.Security.Cryptography.HashAlgorithm.Create((string)arguments[1]))
+                // if using a keyed hash, set the key before computing the hash
+                if (hash.GetType().IsSubclassOf(typeof(System.Security.Cryptography.KeyedHashAlgorithm)))
                 {
-                    // if using a keyed hash, set the key before computing the hash
-                    if (hash.GetType().IsSubclassOf(typeof(System.Security.Cryptography.KeyedHashAlgorithm)))
+                    byte[] key = System.Text.Encoding.ASCII.GetBytes((string)arguments[2]);
+                    ((System.Security.Cryptography.KeyedHashAlgorithm)hash).Key = key;
+                }
+
+                foreach (string file in filesToHash)
+                {
+                    if (bw.CancellationPending)
                     {
-                        byte[] key = System.Text.Encoding.ASCII.GetBytes((string)arguments[2]);
-                        ((System.Security.Cryptography.KeyedHashAlgorithm)hash).Key = key;
+                        hashResults.Add(file, "Cancelled");
+                        e.Cancel = true;
+                        break;
                     }
 
-
-                    filesToHash.ForEach(file =>
-                    {
-                        HashFile(file, hash);
-                        hashBackgroundWorker.ReportProgress(0);
-                    });
+                    hashResults.Add(file, HashFile(file, hash));
+                    bw.ReportProgress(0);
                 }
             }
         }
 
         private void HashBackgroundWorker_ProgressChanged(object sender, ProgressChangedEventArgs e)
         {
+            // userstate will be set to the number of files to hash
             if (e.UserState != null)
             {
                 progressBarHash.Value = 0;
@@ -207,15 +231,31 @@ namespace Hasher
 
         private void HashBackgroundWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
         {
-            SuspendLayout();
+            if (e.Cancelled || e.Error != null)
+            {
+                progressBarHash.Value = 0;
+            }
 
-            dataGridViewHash.RowHeadersWidthSizeMode = DataGridViewRowHeadersWidthSizeMode.DisableResizing;
+            //PERFORMANCE TESTING
+            System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
+            sw.Start();
+
+            dataGridViewHash.SuspendLayout();
+            
+            // testing with 20000 elements and 
+
+            // nothing disabled - 60 seconds 
+            // 5 second refresh with all disabled
+
+            //dataGridViewHash.RowHeadersWidthSizeMode = DataGridViewRowHeadersWidthSizeMode.DisableResizing; // 58 seconds
             dataGridViewHash.RowHeadersVisible = false;
-            dataGridViewHash.AutoSize = false;
-            dataGridViewHash.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
-            dataGridViewHash.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
+            //dataGridViewHash.AutoSize = false;
+            //dataGridViewHash.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+            //dataGridViewHash.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
 
             dataGridViewHash.Rows.Clear();
+
+            dataGridViewHash.Columns[1].HeaderCell.Value = "Hash (" + comboBoxHash.Text + ")";
 
             foreach (KeyValuePair<string, string> result in hashResults)
             {
@@ -225,12 +265,28 @@ namespace Hasher
             //dataGridViewHash.RowHeadersWidthSizeMode = DataGridViewRowHeadersWidthSizeMode.AutoSizeToAllHeaders;
             //dataGridViewHash.RowHeadersVisible = true;
 
-            ResumeLayout();
+            dataGridViewHash.ResumeLayout();
 
             hashResults.Clear();
+
+            sw.Stop();
+
+            Console.WriteLine("Elapsed={0}", sw.Elapsed);
+
+            //now restore the controls
+            buttonCancel.Enabled = false;
+            buttonCalculate.Enabled = true;
+            comboBoxHash.Enabled = true;
+            textBoxHashKey.Enabled = IsHashAlgorithm(comboBoxHash.Text);
+            textBoxFileOrDirectoryToHash.Enabled = true;
+            radioButtonFile.Enabled = true;
+            radioButtonDirectory.Enabled = true;
+            checkBoxRecursive.Enabled = radioButtonDirectory.Checked;
+            dataGridViewHash.Enabled = true;
+            buttonSelectFile.Enabled = true;
         }
 
-        private void HashFile(string file, System.Security.Cryptography.HashAlgorithm hash)
+        private string HashFile(string file, System.Security.Cryptography.HashAlgorithm hash)
         {
             using (System.IO.FileStream stream = System.IO.File.OpenRead(file)) //TODO: needs protection
             {
@@ -241,13 +297,12 @@ namespace Hasher
                 {
                     sb.Append(b.ToString("X2", System.Globalization.CultureInfo.CurrentCulture));
                 }
-                
-                hashResults.Add(file, sb.ToString());
-                //dataGridViewHash.Rows.Add(file, sb.ToString());
+
+                return sb.ToString();
             }
         }
 
-        private bool CheckCalculateButtonValidity(bool IncludeFileCount = false)
+        private bool CheckCalculateButtonValidity(bool IncludeFileCount)
         {
             return IsFileOrDirectoryValid(IncludeFileCount) && IsHashValid();
         }
@@ -271,16 +326,11 @@ namespace Hasher
                         if (hash is System.Security.Cryptography.MACTripleDES)
                         {
                             valid = (key.Length == 16 || key.Length == 24) && !System.Security.Cryptography.TripleDES.IsWeakKey(key);
-
-                            //Array.Resize(ref key, 24);
-                            //System.Security.Cryptography.TripleDESCng temp = new System.Security.Cryptography.TripleDESCng();
-                            //temp.GenerateKey();
-                            //key = temp.Key;
                         }
                         // all other keyed hashes only require non empty keys
                         else
                         {
-                            valid = string.IsNullOrEmpty(textBoxHashKey.Text);
+                            valid = !string.IsNullOrEmpty(textBoxHashKey.Text);
                         }
                     }
                 }
@@ -297,52 +347,110 @@ namespace Hasher
         {
             bool valid = false;
 
-            System.IO.SearchOption searchOption;
-            if (RecursiveCheckBox.Checked)
-            {
-                searchOption = System.IO.SearchOption.AllDirectories;
-            }
-            else
-            {
-                searchOption = System.IO.SearchOption.TopDirectoryOnly;
-            }
-
             string[] list = textBoxFileOrDirectoryToHash.Text.Split(';');
 
-            if (!IncludeFileCount)
+            foreach (string fileOrDirectory in list)
             {
-                foreach (string fileOrDirectory in list)
+                if (System.IO.File.Exists(fileOrDirectory) || System.IO.Directory.Exists(fileOrDirectory))
                 {
-                    if (System.IO.File.Exists(fileOrDirectory) || System.IO.Directory.Exists(fileOrDirectory))
-                    {
-                        // return true if there is at least one valid entry
-                        valid = true;
-                        break;
-                    }
+                    // return true if there is at least one valid entry
+                    valid = true;
+                    break;
                 }
             }
-            else
+
+            if (IncludeFileCount)
             {
-                int fileCount = 0;
-                foreach (string fileOrDirectory in list)
+                labelFilesCount.Text = "Number of file(s) to hash: ...";
+
+                while (countBackgroundWorker.IsBusy)
                 {
-                    if (System.IO.File.Exists(fileOrDirectory))
-                    {
-                        fileCount++;
-                    }
-                    else if (System.IO.Directory.Exists(fileOrDirectory))
-                    {
-                        fileCount = fileCount + System.IO.Directory.GetFiles(fileOrDirectory, "*", searchOption).Count();
-                    }
+                    countBackgroundWorker.CancelAsync();
+                    Application.DoEvents();
                 }
 
-                // return true if there is at least one valid entry
-                valid = fileCount > 0;
+                System.IO.SearchOption searchOption;
+                if (checkBoxRecursive.Checked)
+                {
+                    searchOption = System.IO.SearchOption.AllDirectories;
+                }
+                else
+                {
+                    searchOption = System.IO.SearchOption.TopDirectoryOnly;
+                }
 
-                labelFilesCount.Text = "Number of file(s) to hash: " + fileCount.ToString(System.Globalization.CultureInfo.CurrentCulture);
+                List<object> arguments = new List<object>
+                {
+                    list,
+                    searchOption
+                };
+
+                countBackgroundWorker.RunWorkerAsync(arguments);
             }
 
             return valid;
+        }
+
+        private void CountBackgroundWorker_DoWork(object sender, DoWorkEventArgs e)
+        {
+            // Do not access the form's BackgroundWorker reference directly.
+            // Instead, use the reference provided by the sender parameter.
+            BackgroundWorker bw = sender as BackgroundWorker;
+
+            List<object> arguments = e.Argument as List<object>;
+
+            int fileCount = 0;
+            foreach (string fileOrDirectory in (string[])arguments[0])
+            {
+                if (bw.CancellationPending)
+                {
+                    e.Cancel = true;
+                    break;
+                }
+
+                if (System.IO.File.Exists(fileOrDirectory))
+                {
+                    fileCount++;
+                }
+                else if (System.IO.Directory.Exists(fileOrDirectory))
+                {
+                    fileCount = fileCount + System.IO.Directory.GetFiles(fileOrDirectory, "*", (System.IO.SearchOption)arguments[1]).Count(); //TODO: needs protection
+                }
+            }
+
+            e.Result = fileCount;
+        }
+
+        private void CountBackgroundWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+        {
+            if (e.Error != null)
+            {
+                labelFilesCount.Text = "Number of file(s) to hash: Error";
+            }
+            else if (e.Cancelled)
+            {
+                labelFilesCount.Text = "Number of file(s) to hash: ...";
+            }
+            else
+            {
+                labelFilesCount.Text = "Number of file(s) to hash: " + ((int)e.Result).ToString(System.Globalization.CultureInfo.CurrentCulture);
+            }
+        }
+
+        //TODO: probably use elsewhere but careful of the using
+        private bool IsHashAlgorithm(string hash)
+        {
+            bool isHashAlgorithm = false;
+
+            // set the state of the key text box based on whether a keyed hash has been selected
+            using (System.Security.Cryptography.HashAlgorithm hashAlgorithm = System.Security.Cryptography.HashAlgorithm.Create(hash))
+            {
+                //System.Security.Cryptography.KeyedHashAlgorithm keyedHash = hash as System.Security.Cryptography.KeyedHashAlgorithm;
+                //if (keyedHash != null)  //TODO: test performance
+                isHashAlgorithm = (hashAlgorithm.GetType().IsSubclassOf(typeof(System.Security.Cryptography.KeyedHashAlgorithm)));
+            }
+
+            return isHashAlgorithm;
         }
     }
 }
